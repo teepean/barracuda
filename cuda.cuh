@@ -72,7 +72,7 @@ remove option USE_SIMON_OCC4
 #define scache_global_bwt
 //moved decision to set or not direct_global_bwt into barracuda.cu
 
-__device__ unsigned char read_char(unsigned int pos, unsigned int * lastpos, unsigned int * data )
+__device__ unsigned char read_char(const uint32_t* seq_words, unsigned int pos, unsigned int * lastpos, unsigned int * data )
 // read character back from sequence arrays
 // which is packed as half bytes and stored as in a unsigned int array
 {
@@ -81,7 +81,8 @@ __device__ unsigned char read_char(unsigned int pos, unsigned int * lastpos, uns
 	unsigned int tmp = *data;
 	if (*lastpos!=pos_shifted)
 	{
-		*data = tmp = tex1Dfetch(sequences_array, pos_shifted);
+		tmp = __ldg(&seq_words[pos_shifted]);
+		*data = tmp;
 		*lastpos=pos_shifted;
 	}
 
@@ -537,9 +538,9 @@ __device__ bwtint_t bwt_cuda_occ(uint32_t *global_bwt, bwtint_t k, ubyte_t c, ch
 }
 
 #ifndef direct_sequence
-__device__ int bwt_cuda_match_exact( uint32_t * global_bwt, unsigned int length, const unsigned char * str, bwtint_t *k0, bwtint_t *l0)
+__device__ int bwt_cuda_match_exact( const uint32_t* seq_words, uint32_t * global_bwt, unsigned int length, const unsigned char * str, bwtint_t *k0, bwtint_t *l0)
 #else
-__device__ int bwt_cuda_match_exact( uint32_t * global_bwt, unsigned int length, const unsigned int sequence_offset, bwtint_t *k0, bwtint_t *l0)
+__device__ int bwt_cuda_match_exact( const uint32_t* seq_words, uint32_t * global_bwt, unsigned int length, const unsigned int sequence_offset, bwtint_t *k0, bwtint_t *l0)
 #endif
 //exact match algorithm
 {
@@ -576,7 +577,7 @@ __device__ int bwt_cuda_match_exact( uint32_t * global_bwt, unsigned int length,
 			return 0; // there is an N here. no match
 		}
 #else
-		unsigned char c = read_char(sequence_offset + i, &last_read, &last_read_data );
+		unsigned char c = read_char(seq_words, sequence_offset + i, &last_read, &last_read_data );
 		if (c > 3){
 		  *k0 = 0;
 		  *l0 = bwt_cuda.seq_len;
@@ -631,7 +632,7 @@ __device__ int bwt_cuda_match_exact( uint32_t * global_bwt, unsigned int length,
 
 __global__ void cuda_find_exact_matches(/*const*/ uint32_t * global_bwt, const int no_of_sequences, 
 					const int length, //for direct_index
-					bwtkl_t* kl_device)
+					bwtkl_t* kl_device, const uint2* seq_index, const uint32_t* seq_words)
 //init_info_t* global_init, char* global_has_exact)
 {
 	//WBL re-enabling cuda_find_exact_matches
@@ -648,7 +649,7 @@ __global__ void cuda_find_exact_matches(/*const*/ uint32_t * global_bwt, const i
 		//local_init = global_init[blockId];
 
 #ifndef direct_index
-		const uint2 sequence_info = tex1Dfetch(sequences_index_array, blockId);//local_init.sequence_id);
+		const uint2 sequence_info = __ldg(&seq_index[blockId]);//local_init.sequence_id);
 
 		const unsigned int sequence_offset = sequence_info.x;
 		const unsigned short sequence_length = sequence_info.y;
@@ -679,7 +680,7 @@ __global__ void cuda_find_exact_matches(/*const*/ uint32_t * global_bwt, const i
 
 #ifndef direct_sequence
 		for (int i = 0; i < sequence_length; i++){
-			unsigned char c = read_char(sequence_offset + i, &last_read, &last_read_data );
+			unsigned char c = read_char(seq_words, sequence_offset + i, &last_read, &last_read_data );
 			if(c>3){
 			  bwtkl_t tmp_kl = {0,bwt_cuda.seq_len};
 			  kl_device[blockId] = tmp_kl;
@@ -692,9 +693,9 @@ __global__ void cuda_find_exact_matches(/*const*/ uint32_t * global_bwt, const i
 		bwtint_t k = 0, l = bwt_cuda.seq_len;
 		//global_init[blockId].has_exact = global_has_exact[local_init.sequence_id] = bwt_cuda_match_exact(global_bwt, sequence_length, local_complemented_sequence, &k, &l)>0 ? 1 : 0;
 #ifndef direct_sequence
-		bwt_cuda_match_exact(global_bwt, sequence_length, local_complemented_sequence, &k, &l);
+		bwt_cuda_match_exact(seq_words, global_bwt, sequence_length, local_complemented_sequence, &k, &l);
 #else
-		bwt_cuda_match_exact(global_bwt, sequence_length, sequence_offset, &k, &l);
+		bwt_cuda_match_exact(seq_words, global_bwt, sequence_length, sequence_offset, &k, &l);
 #endif
 		bwtkl_t tmp_kl = {k,l};
 		kl_device[blockId] = tmp_kl;

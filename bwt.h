@@ -103,7 +103,60 @@ extern "C" {
 	void bwt_bwtupdate_core(bwt_t *bwt);
 
 	inline bwtint_t bwt_occ(const bwt_t *bwt, bwtint_t k, ubyte_t c);
-	inline void bwt_occ4(const bwt_t *bwt, bwtint_t k, bwtint_t cnt[4]);
+	
+#define __occ_aux4(bwt, b)											\
+	((bwt)->cnt_table[(b)&0xff] + (bwt)->cnt_table[(b)>>8&0xff]		\
+	 + (bwt)->cnt_table[(b)>>16&0xff] + (bwt)->cnt_table[(b)>>24])
+
+static inline void bwt_occ4(const bwt_t *bwt, bwtint_t k, bwtint_t cnt[4])
+{
+	bwtint_t l, j, x;
+	uint32_t *p;
+
+//	printf("bwtocc4 k: %lu\n",k);
+	if (k == (bwtint_t)(-1)) {
+		memset(cnt, 0, 4 * sizeof(bwtint_t));
+		return;
+	}
+	if (k >= bwt->primary) --k; // because $ is not in bwt
+	p = bwt_occ_intv(bwt, k);
+//	printf ("k>>7<<4: %lu\n",(k>>7<<4));
+//	bwtint_t n[4];
+//	int i;
+//	for (i = 0; i<=3; i++)
+//		n[i] = ((bwtint_t*)p)[i];
+
+//	printf ("p x: %lu, y:%lu, z:%lu; w:%lu\n", n[0],n[1],n[2],n[3]);
+
+	memcpy(cnt, p, 4 * sizeof(bwtint_t));
+
+//	printf ("cnt x: %lu, y:%lu, z:%lu; w:%lu\n", cnt[0],cnt[1],cnt[2],cnt[3]);
+
+//	unsigned int loop = 0;
+//	printf ("p: %u\n",p);
+
+	p += sizeof(bwtint_t);
+
+//	printf ("p: %u, sizeof bwtint_t: %u\n",p,sizeof(bwtint_t));
+
+
+	j = k >> 4 << 4;
+	for (l = k / OCC_INTERVAL * OCC_INTERVAL, x = 0; l < j; l += 16, ++p)
+	{
+		//loop++;
+		x += __occ_aux4(bwt, *p);
+	//	printf ("loop: %u, j: %lu, l: %lu, x: %lu\n",loop,j, l,x);
+	//	printf ("p: %u\n",p);
+	}
+
+	x += __occ_aux4(bwt, *p & ~((1U<<((~k&15)<<1)) - 1)) - (~k&15);
+	cnt[0] += x&0xff;
+	cnt[1] += x>>8&0xff;
+	cnt[2] += x>>16&0xff;
+	cnt[3] += x>>24;
+
+//	printf ("final cnt x: %lu, y:%lu, z:%lu; w:%lu\n", cnt[0],cnt[1],cnt[2],cnt[3]);
+}
 	bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k);
 
 	// more efficient version of bwt_occ/bwt_occ4 for retrieving two close Occ values

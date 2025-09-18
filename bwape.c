@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/time.h>
 #include "bwtaln.h"
 #include "kvec.h"
 #include "bntseq.h"

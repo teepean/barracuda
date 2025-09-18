@@ -12,6 +12,7 @@
 #include "bwtgap.h"
 #include "utils.h"
 #include "barracuda.h"
+#include "bwt.h"
 
 #ifdef HAVE_PTHREAD
 #include <pthread.h>

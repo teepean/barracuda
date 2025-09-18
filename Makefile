@@ -4,6 +4,7 @@
 
 #WBL 25 Aug 2015 Avoid need for LD_LIBRARY_PATH by using libcudart_static.a in place of libcudart.so
 #WBL 28 Feb 2015 compile for Tesla K20 etc (sm_35)
+# Modified to target sm_86 and use CUDA 12.9
 
 # cu source files
 CUFILES	= $(wildcard *.cu)
@@ -26,10 +27,10 @@ USERLIB += -lpthread
 endif
 
 #######################################################
-# Default configuration (Autodetected)
+# Default configuration (Modified for CUDA 12.9)
 #######################################################
-#Cuda installation path (default)
-CUDA_INSTALL_PATH ?= /usr/local/cuda
+#Cuda installation path (modified to use CUDA 12.9)
+CUDA_INSTALL_PATH ?= /usr/local/cuda-12.9
 NV_ROOT_PATH := $(HOME)/NVIDIA_CUDA_SDK
 
 # Basic Auto variable setup for SDK
@@ -60,22 +61,13 @@ endif
 .SUFFIXES : .cu .cu_dbg.o .c_dbg.o .cpp_dbg.o .cu_rel.o .c_rel.o .cpp_rel.o .cubin .ptx
 
 ################################################################################
-# Add option to choose GPU arch
+# Modified to target only sm_86
 ################################################################################
 
-ifeq ($(Arch),sm_20)
-SM_VERSIONS := sm_20 # Compile sm_20 optimized code for fermi or above
-else ifeq ($(Arch),sm_60) # Compile code optimized for sm_60
-SM_VERSIONS := sm_60
-else ifeq ($(Arch),sm_61) # Compile code optimized for sm_61
-SM_VERSIONS := sm_61
-else #ifeq ($(Arch),sm_35) #default is now K20 or above
-SM_VERSIONS := sm_35 # Only Tesla K20 and about supports __ldg
-#else 
-#SM_VERSIONS := sm_13 # 1.3 too old, not supported
-endif
+# Force sm_86 target (RTX 30/40 series, A100, etc.)
+SM_VERSIONS := sm_86
 
-CUDA_INSTALL_PATH ?= /usr/local/cuda
+CUDA_INSTALL_PATH ?= /usr/local/cuda-12.9
 
 ifdef cuda-install
 	CUDA_INSTALL_PATH := $(cuda-install)

@@ -782,7 +782,7 @@ __device__ int cuda_dfs_match(uint32_t * global_bwt, int len, const unsigned cha
 	return best_score;
 }
 
-__global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_sequences, alignment_meta_t* global_alignment_meta, barracuda_aln1_t* global_alns, init_info_t* global_init, widths_bids_t *global_w_b, int best_score, char split_engage, char clump)
+__global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_sequences, alignment_meta_t* global_alignment_meta, barracuda_aln1_t* global_alns, init_info_t* global_init, widths_bids_t *global_w_b, int best_score, char split_engage, char clump, const uint2* seq_index, const uint32_t* seq_words)
 //CUDA kernal for inexact match on both strands
 //calls bwt_cuda_device_calculate_width to determine the boundaries of the search space
 //and then calls dfs_match to search for alignment using dfs approach
@@ -811,7 +811,7 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 		gap_opt_t local_options = options_cuda;
 
 		//get sequences from texture memory
-		const uint2 sequence_info = tex1Dfetch(sequences_index_array, local_init.sequence_id);
+		const uint2 sequence_info = __ldg(&seq_index[local_init.sequence_id]);
 
 		const unsigned int sequence_offset = sequence_info.x;
 		const unsigned short sequence_length = sequence_info.y;
@@ -839,11 +839,11 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 		//the data is packed in a way that requires us to cycle through and change last_read and last_read_data
 		int cycle_i = sequence_length - local_init.start_pos - pass_length;
 		for(int i=0; i<cycle_i; i++){
-			read_char(sequence_offset + i, &last_read, &last_read_data);
+			read_char(seq_words, sequence_offset + i, &last_read, &last_read_data);
 		}
 
 		for (int i = 0; i < pass_length; i++){
-			unsigned char c = read_char(sequence_offset + cycle_i + i, &last_read, &last_read_data );
+			unsigned char c = read_char(seq_words, sequence_offset + cycle_i + i, &last_read, &last_read_data );
 			//local_sequence[i] = c;
 			local_complemented_sequence[i] = c > 3 ? 4 : 3 - c;
 		}
@@ -868,7 +868,7 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 	return;
 }
 
-__global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, widths_bids_t * global_w_b, char * global_N_too_high)
+__global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, widths_bids_t * global_w_b, char * global_N_too_high, const uint2* seq_index, const uint32_t* seq_words)
 {
 	unsigned int blockId = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -879,7 +879,7 @@ __global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, 
 
 		gap_opt_t local_options = options_cuda;
 
-		const uint2 sequence_info = tex1Dfetch(sequences_index_array, blockId);
+		const uint2 sequence_info = __ldg(&seq_index[blockId]);
 
 		const unsigned int sequence_offset = sequence_info.x;
 		const unsigned short sequence_length = sequence_info.y;
@@ -891,7 +891,7 @@ __global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, 
 
 		for(int i=0; i<sequence_length; ++i)
 		{
-			unsigned char c = read_char(sequence_offset + i, &last_read, &last_read_data );
+			unsigned char c = read_char(seq_words, sequence_offset + i, &last_read, &last_read_data );
 			local_sequence[i] = c;
 			if(c>3) N++;
 			if(N>local_options.max_diff) break;
@@ -956,7 +956,7 @@ __global__ void cuda_split_inexact_match_caller(int no_of_sequences, unsigned sh
 #endif
 
 		//get sequences from texture memory
-		//const uint2 sequence_info = tex1Dfetch(sequences_index_array, blockId);
+		//const uint2 sequence_info = __ldg(&seq_index[blockId]);
 
 		// sequences no longer align with the block ids
 		const uint2 sequence_info = tex1Dfetch(sequences_index_array, local_alignment_store.sequence_id);

@@ -71,6 +71,7 @@ improve "[aln_debug] bwt loaded %lu bytes, <assert.h> include cuda.cuh
 */
 
 #define PACKAGE_VERSION "0.7.0 beta $Revision: 1.112 $"
+#include <cuda_runtime.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <math.h>
@@ -197,8 +198,8 @@ __device__ __constant__ int size_global_bwt; //number of int for bounds checking
 // therefore effectively there are 2^27x16bytes memory can be access = 2GBytes memory.
 //texture<uint4, 1, cudaReadModeElementType> bwt_occ_array;
 //texture<uint4, 1, cudaReadModeElementType> rbwt_occ_array;
-texture<unsigned int, 1, cudaReadModeElementType> sequences_array;
-texture<uint2, 1, cudaReadModeElementType> sequences_index_array;
+// Legacy texture references removed; kernels now read sequences and indices
+// directly from read-only global memory (via __ldg when available).
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -439,20 +440,12 @@ error need to set same_length...
 #endif
 
     //copy main_sequences_width from host to device
-    cudaUnbindTexture(sequences_index_array);
-    report_cuda_error_GPU("[aln_core] Error freeing texture \"sequences_index_array\".");
     cudaMemcpy(global_sequences_index, main_sequences_index, (number_of_sequences)*sizeof(uint2), cudaMemcpyHostToDevice);
     report_cuda_error_GPU("[aln_core] Error copying to \"global_sequences_index\" on GPU");
-    cudaBindTexture(0, sequences_index_array, global_sequences_index, (number_of_sequences)*sizeof(uint2));
-    report_cuda_error_GPU("[aln_core] Error binding texture \"sequences_index_array\".\n");
 
     //copy main_sequences from host to device, sequences array length should be accumulated_length/2
-    cudaUnbindTexture(sequences_array);
-    report_cuda_error_GPU("[aln_core] Error freeing texture \"sequences_array\".");
     cudaMemcpy(global_sequences, main_sequences, (1ul<<(buffer))*sizeof(unsigned char), cudaMemcpyHostToDevice);
     report_cuda_error_GPU("[aln_core] Error copying to \"global_sequences\" on GPU");
-    cudaBindTexture(0, sequences_array, global_sequences, (1ul<<(buffer))*sizeof(unsigned char));
-    report_cuda_error_GPU("[aln_core] Error binding texture to \"sequences_array\".\n");
 
     if ( read_size ) *read_size = accumulated_length;
     free (seqs);
@@ -858,8 +851,10 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Widths & Bids
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		//in this case, seq_flag is used to note sequences that have too many N characters
-		cuda_prepare_widths<<<dimGrid,dimBlock>>>(global_bwt, no_of_sequences, global_w_b_device, global_seq_flag_device);
+		// in this case, seq_flag is used to note sequences that have too many N characters
+		// pass sequence index and words pointer for read-only global loads (Path B)
+		cuda_prepare_widths<<<dimGrid,dimBlock>>>(global_bwt, no_of_sequences,
+			global_w_b_device, global_seq_flag_device, global_sequences_index, reinterpret_cast<const uint32_t*>(global_sequences));
 		//fprintf(stderr,"cuda_prepare_widths<<<(%d,%d,%d)(%d,%d,%d)>>>(global_bwt, %d, global_w_b_device, global_seq_flag_device)\n",
 		//	dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_of_sequences);
 
@@ -893,7 +888,9 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		//	dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_of_sequences,max_sequence_length);
 		struct timeval start2;
 		gettimeofday (&start2, NULL);
-		cuda_find_exact_matches<<<dimGrid,dimBlock>>>(global_bwt, no_of_sequences, max_sequence_length, kl_device);
+		cuda_find_exact_matches<<<dimGrid,dimBlock>>>(
+			global_bwt, no_of_sequences, max_sequence_length, kl_device,
+			global_sequences_index, reinterpret_cast<const uint32_t*>(global_sequences));
 		cudaDeviceSynchronize();
 		cuda_err = cudaGetLastError();
 		if(int(cuda_err))
@@ -1016,7 +1013,10 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		{//struct timeval start2;
 		//gettimeofday (&start2, NULL);
 
-		cuda_inexact_match_caller<<<dimGrid,dimBlock>>>(global_bwt, no_to_process, global_alignment_meta_device, global_alns_device, global_init_device, global_w_b_device, best_score, split_engage, SUFFIX_CLUMP_WIDTH>0);
+		cuda_inexact_match_caller<<<dimGrid,dimBlock>>>(
+			global_bwt, no_to_process, global_alignment_meta_device, global_alns_device,
+			global_init_device, global_w_b_device, best_score, split_engage, SUFFIX_CLUMP_WIDTH>0,
+			global_sequences_index, reinterpret_cast<const uint32_t*>(global_sequences));
 		//fprintf(stderr,"1 cuda_inexact_match_caller<<<(%d,%d,%d)(%d,%d,%d)>>>(,%d,,,,,,,%d)\n",
 		//	dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_to_process, SUFFIX_CLUMP_WIDTH);
 		//fprintf(stderr, "'");
@@ -1250,7 +1250,11 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 				dim3 dimGrid(gridsize);
 				//struct timeval start2;
 				//gettimeofday (&start2, NULL);
-				cuda_inexact_match_caller<<<dimGrid,dimBlock>>>(global_bwt, no_to_process, global_alignment_meta_device, global_alns_device, global_init_device, global_w_b_device, best_score, split_engage, 0);
+				cuda_inexact_match_caller<<<dimGrid,dimBlock>>>(
+					global_bwt, no_to_process, global_alignment_meta_device, global_alns_device,
+					global_init_device, global_w_b_device, best_score, split_engage, 0,
+					global_sequences_index, reinterpret_cast<const uint32_t*>(global_sequences)
+				);
 				//fprintf(stderr," 2_cuda_inexact_match_caller<<<(%d,%d,%d)(%d,%d,%d)>>>(,%d,,,,,,,0)\n",
 				//	dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_to_process);
 				cudaDeviceSynchronize(); //wait until kernel has had a chance to report error
