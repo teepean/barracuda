@@ -30,7 +30,7 @@ endif
 # Default configuration (Modified for CUDA 12.9)
 #######################################################
 #Cuda installation path (modified to use CUDA 12.9)
-CUDA_INSTALL_PATH ?= /usr/local/cuda-12.9
+CUDA_INSTALL_PATH ?= /usr/local/cuda-13.0
 NV_ROOT_PATH := $(HOME)/NVIDIA_CUDA_SDK
 
 # Basic Auto variable setup for SDK
@@ -67,7 +67,7 @@ endif
 # Force sm_86 target (RTX 30/40 series, A100, etc.)
 SM_VERSIONS := sm_86
 
-CUDA_INSTALL_PATH ?= /usr/local/cuda-12.9
+CUDA_INSTALL_PATH ?= /usr/local/cuda-13.0
 
 ifdef cuda-install
 	CUDA_INSTALL_PATH := $(cuda-install)

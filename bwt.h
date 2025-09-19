@@ -29,7 +29,7 @@
 #define BWA_BWT_H
 
 #include <stdint.h>
-
+#include <string.h>
 // requirement: (OCC_INTERVAL%16 == 0); please DO NOT change this line
 #define OCC_INTERVAL 0x80
 
