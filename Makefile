@@ -48,6 +48,12 @@ else
 verbose = 0
 dbg = 0
 endif
+
+# Allow overriding for debug/release via command line (e.g., make DEBUG=1)
+ifeq ($(DEBUG),1)
+ConfigName = debug
+endif
+
 ################################################################################
 # Below is from commom.mk
 ################################################################################
@@ -134,6 +140,7 @@ COMMONFLAGS += $(INCLUDES) -DUNIX
 ifeq ($(dbg),1)
 	COMMONFLAGS += -g
 	NVCCFLAGS   += -D_DEBUG
+	COMMONFLAGS += -Og -finline-functions
 	BINSUBDIR   := debug
 	LIBSUFFIX   := D
 else 
@@ -226,9 +233,9 @@ ifneq ($(DARWIN),)
 endif
 
 # Add common flags
-NVCCFLAGS += $(COMMONFLAGS)
-CXXFLAGS  += $(COMMONFLAGS)
-CFLAGS    += $(COMMONFLAGS)
+NVCCFLAGS := $(COMMONFLAGS) $(NVCCFLAGS)
+CXXFLAGS := $(COMMONFLAGS) $(CXXFLAGS)
+CFLAGS := $(COMMONFLAGS) $(CFLAGS)
 
 ifeq ($(nvcc_warn_verbose),1)
 	NVCCFLAGS += $(addprefix --compiler-options ,$(CXXWARN_FLAGS)) 
