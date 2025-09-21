@@ -602,10 +602,28 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	fp_sa = xopen(fn_sa, "r");
 
 	m_aln = 0;
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+
+	// Read SAI magic header if present (backward compatibility)
+	char magic[4];
+	long pos = ftell(fp_sa);
+	if (fread(magic, 1, 4, fp_sa) == 4) {
+		if (strncmp(magic, SAI_MAGIC, 4) == 0) {
+			// New format with magic header
+			fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+		} else {
+			// Old format without magic header - rewind and read options
+			fseek(fp_sa, pos, SEEK_SET);
+			fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+		}
+	} else {
+		fprintf(stderr, "[E::%s] Cannot read SAI file header\n", __func__);
+		exit(1);
+	}
 	check_opt(&opt,-1,fn_sa);
-	if (!(opt.mode & BWA_MODE_COMPREAD)) // in color space; initialize ntpac
-		ntbns = bwa_open_nt(prefix);
+	// Color space mode disabled - regular DNA only
+	// if (!(opt.mode & BWA_MODE_COMPREAD)) // in color space; initialize ntpac
+	//	ntbns = bwa_open_nt(prefix);
+	ntbns = NULL;
 	bwa_print_sam_SQ(bns);
 	bwa_print_sam_PG();
 	// set ks

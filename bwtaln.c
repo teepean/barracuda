@@ -232,7 +232,10 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *opt)
 	if(opt->n_threads < 0)
 	{
 		if(!opt->no_header) //remove header for multi-instances "e.g. manyfish"
-		err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+		{
+			err_fwrite(SAI_MAGIC, 1, 4, stdout);
+			err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+		}
 
 		cuda_alignment_core(prefix, ks,  opt);
 		return;
@@ -268,7 +271,10 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *opt)
 		// core loop
 
 		if(!opt->no_header) //remove header for multi-instances "e.g. manyfish"
-		err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+		{
+			err_fwrite(SAI_MAGIC, 1, 4, stdout);
+			err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+		}
 
 
 		while ((seqs = bwa_read_seq(ks, 0x40000, &n_seqs, opt->mode, opt->trim_qual)) != 0) {

@@ -787,6 +787,7 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 //calls bwt_cuda_device_calculate_width to determine the boundaries of the search space
 //and then calls dfs_match to search for alignment using dfs approach
 {
+	asm volatile (".pragma \"enable_smem_spilling\";");
 	// Block ID for CUDA threads, as there is only 1 thread per block possible for now
 	unsigned int blockId = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -804,17 +805,19 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 		memset(&local_alns, 0, MAX_NO_PARTIAL_HITS*sizeof(barracuda_aln1_t));
 		local_init = global_init[blockId];
 
+
 		local_alignment_meta.sequence_id = local_init.sequence_id;
 		local_w_b = global_w_b[local_init.sequence_id];
 
 		//initialize local options for each query sequence
 		gap_opt_t local_options = options_cuda;
 
-		//get sequences from texture memory
+		//get sequences from texture memory with bounds checking
 		const uint2 sequence_info = __ldg(&seq_index[local_init.sequence_id]);
 
 		const unsigned int sequence_offset = sequence_info.x;
 		const unsigned short sequence_length = sequence_info.y;
+
 		unsigned int last_read = ~0;
 		unsigned int last_read_data = 0;
 		unsigned int pass_length;
@@ -831,6 +834,7 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 		else {
 			pass_length = sequence_length;
 		}
+
 
 		if(clump){
 			pass_length = min(pass_length, SUFFIX_CLUMP_WIDTH);
@@ -857,7 +861,9 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 		if (local_options.max_diff < options_cuda.max_gapo) local_options.max_gapo = local_options.max_diff;
 
 		//Align with two the 2-way bwt reference
+		// Removed printf debug to avoid SAI corruption - using host-side debug instead
 		local_alignment_meta.best_score = local_init.score = cuda_dfs_match(global_bwt, pass_length, local_complemented_sequence, local_w_b.widths, local_w_b.bids, &local_options, &local_alignment_meta, local_alns, &local_init, best_score, sequence_length, seeding);
+		// Removed printf debug to avoid SAI corruption
 
 		// copy alignment info to global memory
 		global_alignment_meta[blockId] = local_alignment_meta;
@@ -870,6 +876,7 @@ __global__ void cuda_inexact_match_caller(uint32_t * global_bwt, int no_of_seque
 
 __global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, widths_bids_t * global_w_b, char * global_N_too_high, const uint2* seq_index, const uint32_t* seq_words)
 {
+	asm volatile (".pragma \"enable_smem_spilling\";");
 	unsigned int blockId = blockIdx.x * blockDim.x + threadIdx.x;
 
 	if ( blockId < no_of_sequences ) {
@@ -883,6 +890,13 @@ __global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, 
 
 		const unsigned int sequence_offset = sequence_info.x;
 		const unsigned short sequence_length = sequence_info.y;
+
+		// Bounds checking for sequence parameters
+		if (sequence_length == 0 || sequence_length > MAX_SEQUENCE_LENGTH) {
+			global_N_too_high[blockId] = 1;
+			return;
+		}
+
 		unsigned int last_read = ~0;
 		unsigned int last_read_data;
 		int N = 0;
@@ -899,8 +913,14 @@ __global__ void cuda_prepare_widths(uint32_t * global_bwt, int no_of_sequences, 
 
 		if(N<=local_options.max_diff){
 			global_N_too_high[blockId] = 0;
-			bwt_cuda_device_calculate_width(global_bwt, local_sequence, local_w_b.widths, local_w_b.bids, 0, sequence_length - local_options.seed_len - 1);
-			bwt_cuda_device_calculate_width(global_bwt, local_sequence, local_w_b.widths, local_w_b.bids, sequence_length - local_options.seed_len - 1, sequence_length);
+			// Calculate sequence widths with appropriate bounds
+			if (sequence_length > local_options.seed_len) {
+				bwt_cuda_device_calculate_width(global_bwt, local_sequence, local_w_b.widths, local_w_b.bids, 0, sequence_length - local_options.seed_len - 1);
+				bwt_cuda_device_calculate_width(global_bwt, local_sequence, local_w_b.widths, local_w_b.bids, sequence_length - local_options.seed_len - 1, sequence_length);
+			} else {
+				// For short sequences, calculate width for the entire sequence
+				bwt_cuda_device_calculate_width(global_bwt, local_sequence, local_w_b.widths, local_w_b.bids, 0, sequence_length);
+			}
 		}
 		else {
 			global_N_too_high[blockId] = 1;

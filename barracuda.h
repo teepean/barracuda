@@ -34,8 +34,8 @@
 
 #define SUFFIX_CLUMP_WIDTH 0 //0 to disable, 1 to enable (do not exceed 255)
 
-#define MAX_SEQUENCE_LENGTH 150
-#define MAX_ALN_LENGTH 100 //Max length for alignment kernel, cannot go beyond 225 (ptx error)
+#define MAX_SEQUENCE_LENGTH 180
+#define MAX_ALN_LENGTH 180 //Max length for alignment kernel, cannot go beyond 225 (ptx error)
 #define MAX_NO_OF_ALIGNMENTS 10
 
 #define MAX_NO_PARTIAL_HITS	25 //must be the maximum of the next 2

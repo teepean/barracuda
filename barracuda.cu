@@ -86,6 +86,43 @@ improve "[aln_debug] bwt loaded %lu bytes, <assert.h> include cuda.cuh
 #include "utils.h"
 #include "barracuda.h"
 
+// Modern streaming architecture (inspired by mm2-gb)
+#define MAX_STREAMS 4
+#define SHORT_READ_THRESHOLD 80
+#define MEDIUM_READ_THRESHOLD 120
+#define LONG_READ_THRESHOLD 250
+
+// Stream-based buffer management structure
+typedef struct {
+    cudaStream_t stream;
+    cudaEvent_t start_event;
+    cudaEvent_t stop_event;
+    bool is_busy;
+    int stream_id;
+
+    // Read categorization for this stream
+    int n_short_reads;
+    int n_medium_reads;
+    int n_long_reads;
+    int max_read_length_in_stream;
+
+    // Dynamic buffer sizes for this stream
+    size_t allocated_sequences_size;
+    size_t allocated_alignment_size;
+
+} barracuda_stream_info_t;
+
+// Global streaming setup
+static barracuda_stream_info_t g_streams[MAX_STREAMS];
+static int g_num_active_streams = 0;
+static bool g_streaming_initialized = false;
+
+// Function declarations for streaming architecture
+static void barracuda_init_streaming();
+static void barracuda_cleanup_streaming();
+static int barracuda_find_available_stream();
+static void barracuda_process_reads_by_length(bwa_seqio_t *ks, const gap_opt_t *opt);
+
 #define d_mycache4 const uint4* mycache0
 #define d_mycache8 const uint2* mycache0
 #define d_mycache16 const uint32_t* mycache0
@@ -225,6 +262,20 @@ void report_cuda_error_GPU(cudaError_t cuda_error, const char *message)
 		exit(1);
 	}
 }
+
+// Modern CUDA error checking macro (inspired by mm2-gb)
+#define cudaCheck() do { \
+    cudaError_t err = cudaGetLastError(); \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "[CUDA Error] %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// Memory size constants for modern GPU memory management
+#define OneK 1024
+#define OneM (OneK*1024)
+#define OneG (OneM*1024)
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -647,6 +698,98 @@ void print_global_alns(const int no_to_process, const int max_no_partial_hits, c
 
   free(global_alns_host);
 }*/
+
+// Modern streaming architecture implementation (inspired by mm2-gb)
+static void barracuda_init_streaming() {
+    if (g_streaming_initialized) return;
+
+    fprintf(stderr, "[Info] Initializing modern streaming architecture with %d streams\n", MAX_STREAMS);
+
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        barracuda_stream_info_t *stream = &g_streams[i];
+
+        // Create CUDA stream
+        cudaStreamCreate(&stream->stream);
+        cudaCheck();
+
+        // Create events for timing
+        cudaEventCreate(&stream->start_event);
+        cudaCheck();
+        cudaEventCreate(&stream->stop_event);
+        cudaCheck();
+
+        // Initialize stream state
+        stream->is_busy = false;
+        stream->stream_id = i;
+        stream->n_short_reads = 0;
+        stream->n_medium_reads = 0;
+        stream->n_long_reads = 0;
+        stream->max_read_length_in_stream = 0;
+        stream->allocated_sequences_size = 0;
+        stream->allocated_alignment_size = 0;
+    }
+
+    g_num_active_streams = MAX_STREAMS;
+    g_streaming_initialized = true;
+
+    fprintf(stderr, "[Info] Streaming architecture initialized successfully\n");
+}
+
+static void barracuda_cleanup_streaming() {
+    if (!g_streaming_initialized) return;
+
+    fprintf(stderr, "[Info] Cleaning up streaming architecture\n");
+
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        barracuda_stream_info_t *stream = &g_streams[i];
+
+        // Wait for stream to complete
+        if (stream->stream) {
+            cudaStreamSynchronize(stream->stream);
+            cudaCheck();
+            cudaStreamDestroy(stream->stream);
+            cudaCheck();
+        }
+
+        // Destroy events
+        if (stream->start_event) {
+            cudaEventDestroy(stream->start_event);
+            cudaCheck();
+        }
+        if (stream->stop_event) {
+            cudaEventDestroy(stream->stop_event);
+            cudaCheck();
+        }
+
+        stream->is_busy = false;
+    }
+
+    g_streaming_initialized = false;
+    g_num_active_streams = 0;
+}
+
+static int barracuda_find_available_stream() {
+    for (int i = 0; i < g_num_active_streams; i++) {
+        if (!g_streams[i].is_busy) {
+            return i;
+        }
+    }
+    return -1; // All streams busy
+}
+
+static int barracuda_categorize_read_length(int length) {
+    if (length <= SHORT_READ_THRESHOLD) return 0; // Short
+    if (length <= MEDIUM_READ_THRESHOLD) return 1; // Medium
+    if (length <= LONG_READ_THRESHOLD) return 2; // Long
+    return 3; // Ultra-long (requires special handling)
+}
+
+static void barracuda_process_reads_by_length(bwa_seqio_t *ks, const gap_opt_t *opt) {
+    // This will be integrated with the existing core_kernel_loop logic
+    // For now, it's a placeholder for the length-based processing logic
+    fprintf(stderr, "[Info] Processing reads with length-based categorization\n");
+}
+
 void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *ks, double total_time_used, uint32_t *global_bwt)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Core loop (this loads sequences to host memory, transfers to cuda device and aligns via cuda in CUDA blocks)
@@ -686,7 +829,12 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		gap_opt_t *options;
 
 		// initial best score is the worst tolerated score without any alignment hit.
-		const int best_score = aln_score(opt->max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
+		// Fix for ancient DNA: use reasonable max_diff if global value is invalid
+		int effective_max_diff = (opt->max_diff < 0) ? 5 : opt->max_diff;
+		const int best_score = aln_score(effective_max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
+		fprintf(stderr, "[aln_debug] Scoring parameters: s_mm=%d, s_gapo=%d, s_gape=%d\n", opt->s_mm, opt->s_gapo, opt->s_gape);
+		fprintf(stderr, "[aln_debug] Max differences: max_diff=%d (using effective_max_diff=%d), max_gapo=%d, max_gape=%d\n", opt->max_diff, effective_max_diff, opt->max_gapo, opt->max_gape);
+		fprintf(stderr, "[aln_debug] Calculated best_score threshold: %d\n", best_score);
 
 		// global alignment stores for device
 		//Variable for alignment result stores
@@ -703,19 +851,36 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 
 
 
-	//CPU and GPU memory allocations
+	//CPU and GPU memory allocations with modern memory management
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	gettimeofday (&start, NULL);
+
+	// Modern GPU memory reporting (mm2-gb technique)
+	size_t free_mem, total_mem;
+	cudaMemGetInfo(&free_mem, &total_mem);
+	cudaCheck();
+	fprintf(stderr, "[Info] GPU Memory: %.2f GB total, %.2f GB available\n",
+			(float)total_mem / OneG, (float)free_mem / OneG);
 		//allocate global_sequences memory in device
 		cudaMalloc((void**)&global_sequences, (1ul<<(buffer))*sizeof(unsigned char));
 		report_cuda_error_GPU("[core] Error allocating cuda memory for \"global_sequences\".");
-		main_sequences = (unsigned char *)malloc((1ul<<(buffer))*sizeof(unsigned char));
+		// Use pinned memory for faster host-device transfers (mm2-gb technique)
+		cudaMallocHost((void**)&main_sequences, (1ul<<(buffer))*sizeof(unsigned char));
+		if (!main_sequences) {
+			fprintf(stderr, "[Error] Failed to allocate pinned host memory for sequences\n");
+			exit(EXIT_FAILURE);
+		}
 		//suffixes for clumping
 		main_suffixes = (unsigned long long *)malloc((1ul<<(buffer-3))*sizeof(unsigned long long));
 		//allocate global_sequences_index memory in device assume the average length is bigger the 16bp (currently -3, -4 for 32bp, -3 for 16bp)long
 		cudaMalloc((void**)&global_sequences_index, (1ul<<(buffer-3))*sizeof(uint2));
 		report_cuda_error_GPU("[core] Error allocating cuda memory for \"global_sequences_index\".");
-		main_sequences_index = (uint2*)malloc((1ul<<(buffer-3))*sizeof(uint2));
+		// Use pinned memory for sequence index for faster transfers
+		cudaMallocHost((void**)&main_sequences_index, (1ul<<(buffer-3))*sizeof(uint2));
+		if (!main_sequences_index) {
+			fprintf(stderr, "[Error] Failed to allocate pinned host memory for sequence index\n");
+			exit(EXIT_FAILURE);
+		}
 		//allocate and copy options (opt) to device constant memory
 		cudaMalloc((void**)&options, sizeof(gap_opt_t));
 		report_cuda_error_GPU("[core] Error allocating cuda memory for \"options\".");
@@ -758,10 +923,39 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 	time_used = diff_in_seconds(&end,&start);
 	total_time_used += time_used;
 
-#if DEBUG_LEVEL > 0
+// #if DEBUG_LEVEL > 0
 	fprintf(stderr,"[aln_debug] Finished allocating CUDA device memory\n");
-#endif
+// #endif
 
+	// Long-read buffer management (inspired by mm2-gb)
+	///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// Separate buffers for long reads (>MEDIUM_READ_THRESHOLD bp)
+	unsigned char *global_long_sequences = NULL, *main_long_sequences = NULL;
+	uint2 *global_long_sequences_index = NULL, *main_long_sequences_index = NULL;
+	size_t long_buffer_capacity = (1ul<<(buffer-2)); // Smaller initial capacity for long reads
+
+	// Allocate long-read device memory
+	cudaMalloc((void**)&global_long_sequences, long_buffer_capacity*sizeof(unsigned char));
+	report_cuda_error_GPU("[core] Error allocating cuda memory for long reads \"global_long_sequences\".");
+
+	cudaMallocHost((void**)&main_long_sequences, long_buffer_capacity*sizeof(unsigned char));
+	if (!main_long_sequences) {
+		fprintf(stderr, "[Error] Failed to allocate pinned host memory for long sequences\n");
+		exit(EXIT_FAILURE);
+	}
+
+	cudaMalloc((void**)&global_long_sequences_index, (long_buffer_capacity/LONG_READ_THRESHOLD)*sizeof(uint2));
+	report_cuda_error_GPU("[core] Error allocating cuda memory for long reads \"global_long_sequences_index\".");
+
+	cudaMallocHost((void**)&main_long_sequences_index, (long_buffer_capacity/LONG_READ_THRESHOLD)*sizeof(uint2));
+	if (!main_long_sequences_index) {
+		fprintf(stderr, "[Error] Failed to allocate pinned host memory for long sequence index\n");
+		exit(EXIT_FAILURE);
+	}
+
+	fprintf(stderr, "[Info] Long-read buffers allocated: %.2f MB capacity\n",
+			(float)long_buffer_capacity / (1024*1024));
 
 	//Core loop starts here
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -778,34 +972,68 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 	if ((int) selected_properties.major > 1) {
 		blocksize = 64;
 	} else {
-		blocksize = 64;//gives 99% of top speed on Tesla T10 with ERR239771_1.200k.fastq
+		blocksize = 64;//Restored original block size with memory spilling optimization
 	}
 
 	while ( ( no_of_sequences = copy_sequences_to_cuda_memory(ks, global_sequences_index, main_sequences_index, global_sequences, main_sequences, &read_size, &max_sequence_length, &same_length, buffer, main_suffixes, SUFFIX_CLUMP_WIDTH) ) > 0 )
 	{
+		// Modern read length categorization (inspired by mm2-gb)
+		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+		int n_short_reads = 0, n_medium_reads = 0, n_long_reads = 0, n_ultra_long_reads = 0;
+		avg_length = (read_size/no_of_sequences);
+
+		// Categorize reads by length for differential processing
+		for (int i = 0; i < no_of_sequences; i++) {
+			int read_len = main_sequences_index[i].y; // .y contains read length
+			int category = barracuda_categorize_read_length(read_len);
+
+			switch(category) {
+				case 0: n_short_reads++; break;
+				case 1: n_medium_reads++; break;
+				case 2: n_long_reads++; break;
+				case 3: n_ultra_long_reads++; break;
+			}
+		}
+
+		fprintf(stderr, "[Info] Batch %d: %d sequences (%d short ≤%d bp, %d medium ≤%d bp, %d long ≤%d bp, %d ultra-long >%d bp)\n",
+				loopcount, no_of_sequences, n_short_reads, SHORT_READ_THRESHOLD,
+				n_medium_reads, MEDIUM_READ_THRESHOLD, n_long_reads, LONG_READ_THRESHOLD,
+				n_ultra_long_reads, LONG_READ_THRESHOLD);
+
+		// For now, process all reads through standard path but with enhanced monitoring
+		// TODO: In future iteration, split ultra-long reads to separate buffer/processing
+		if (n_ultra_long_reads > 0) {
+			fprintf(stderr, "[Warning] %d ultra-long reads detected. Consider using specialized long-read aligner for optimal results.\n", n_ultra_long_reads);
+		}
+
 		#define GRID_UNIT 32
 		int gridsize = GRID_UNIT * (1 + int (((no_of_sequences/blocksize) + ((no_of_sequences%blocksize)!=0))/GRID_UNIT));
 		dim3 dimGrid(gridsize);
 		dim3 dimBlock(blocksize);
-
-		avg_length = (read_size/no_of_sequences);
 		split_engage = avg_length > SPLIT_ENGAGE;
 
 		if(opt->seed_len > avg_length)
 		{
-			fprintf(stderr,"[aln_core] Warning! Specified seed length [%d] exceeds average read length, setting seed length to %d bp.\n", opt->seed_len, int ((read_size/no_of_sequences)>>1));
-			opt->seed_len = read_size/no_of_sequences >> 1; //if specify seed length not valid, set to half the sequence length
+			// For ancient DNA: if seed length >= 1000, disable seeding entirely (common aDNA practice)
+			if(opt->seed_len >= 1000) {
+				fprintf(stderr,"[aln_core] Ancient DNA mode: Large seed length [%d] specified, disabling seeding for damaged DNA compatibility.\n", opt->seed_len);
+				opt->seed_len = 0; // Set to 0 to completely disable seeding
+			} else {
+				fprintf(stderr,"[aln_core] Warning! Specified seed length [%d] exceeds average read length, setting seed length to %d bp.\n", opt->seed_len, int ((read_size/no_of_sequences)>>1));
+				opt->seed_len = read_size/no_of_sequences >> 1; //if specify seed length not valid, set to half the sequence length
+			}
 		}
 
 		if (!loopcount) fprintf(stderr, "[aln_core] Now aligning sequence reads to reference assembly, please wait..");
 
 		if (!loopcount)	{
-#if DEBUG_LEVEL > 0
+// #if DEBUG_LEVEL > 0
 			fprintf(stderr, "[aln_debug] Average read size: %dbp\n", read_size/no_of_sequences);
 			fprintf(stderr, "[aln_debug] Using Reduced kernel\n");
 			fprintf(stderr, "[aln_debug] Using SIMT with grid size: %u, block size: %d. ", gridsize,blocksize) ;
 			fprintf(stderr,"\n[aln_debug] Loop count: %i\n", loopcount + 1);
-#endif
+// #endif
 		//	fprintf(stderr,"[aln_core] Processing %d sequence reads at a time.", (gridsize*blocksize)) ;
 		}
 		//fprintf(stderr, "%d sequences max_sequence_length=%d same_length=%d\n", no_of_sequences, max_sequence_length, same_length);
@@ -818,7 +1046,6 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		time_used = diff_in_seconds(&end,&start);
 
 		int run_no_sequences = no_of_sequences; //for compatibility to PETR_SPLIT_KERNEL only
-
 		total_time_used+=time_used;
 
 		// initialise the alignment stores
@@ -853,12 +1080,16 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// in this case, seq_flag is used to note sequences that have too many N characters
 		// pass sequence index and words pointer for read-only global loads (Path B)
+		fprintf(stderr,"\n[aln_debug] Do we reach cuda_prepare_widths  \n");
 		cuda_prepare_widths<<<dimGrid,dimBlock>>>(global_bwt, no_of_sequences,
 			global_w_b_device, global_seq_flag_device, global_sequences_index, reinterpret_cast<const uint32_t*>(global_sequences));
-		//fprintf(stderr,"cuda_prepare_widths<<<(%d,%d,%d)(%d,%d,%d)>>>(global_bwt, %d, global_w_b_device, global_seq_flag_device)\n",
-		//	dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_of_sequences);
-
+		// Modern error checking immediately after kernel launch
+		cudaCheck();
+		fprintf(stderr,"cuda_prepare_widths<<<(%d,%d,%d)(%d,%d,%d)>>>(global_bwt, %d, global_w_b_device, global_seq_flag_device)\n",
+			dimGrid.x,dimGrid.y,dimGrid.z,dimBlock.x,dimBlock.y,dimBlock.z,no_of_sequences);
+		fprintf(stderr,"\n[aln_debug] Do we get past cuda_prepare_widths  \n");
 		cudaDeviceSynchronize();
+		cudaCheck(); // Modern error checking after synchronization
 		cuda_err = cudaGetLastError();
 		if(int(cuda_err))
 		{
@@ -872,12 +1103,12 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		  cudaMemcpy(w_b, global_w_b_device, nbytes, cudaMemcpyDeviceToHost);
 		  report_cuda_error_GPU("[aln_core] Error reading \"global_w_b_device\" from GPU.");
 		  for(int i=0;i<no_of_sequences;i++) {
-		    printf("w_b %d ",i);
+		    fprintf(stderr,"w_b %d ",i);
 		    for(int j=0;j<max_sequence_length+1;j++) {
-		      printf("%u %u",w_b[i].widths[j],int(w_b[i].bids[j]));
-		      if(j<=max_sequence_length) printf(" ");
+		      fprintf(stderr,"%u %u",w_b[i].widths[j],int(w_b[i].bids[j]));
+		      if(j<=max_sequence_length) fprintf(stderr," ");
 		    }
-		    printf("\n");
+		    fprintf(stderr,"\n");
 		  }
 		  free(w_b);
 		}*/
@@ -922,6 +1153,9 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		unsigned int no_to_process = 0;
 		for(int i=0; i<no_of_sequences; i++){
 		    //use K,L values to note sequences that have a unique exact match - allows setting of best_score=0 and skiping rest of processing
+		    if(global_seq_flag_host[i]) {
+		        //fprintf(stderr,"[aln_debug] Sequence %d flagged (too many Ns or bounds check failed)\n", i);
+		    }
 			if(same_length && /*ie cuda_find_exact_matches has been run*/
 			   kl_host[i].k == kl_host[i].l) {
 		    //save k and l, clear rest (n_mm etc)
@@ -1013,6 +1247,7 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 		{//struct timeval start2;
 		//gettimeofday (&start2, NULL);
 
+		fprintf(stderr,"\n[aln_debug] Launching cuda_inexact_match_caller with %d sequences\n", no_to_process);
 		cuda_inexact_match_caller<<<dimGrid,dimBlock>>>(
 			global_bwt, no_to_process, global_alignment_meta_device, global_alns_device,
 			global_init_device, global_w_b_device, best_score, split_engage, SUFFIX_CLUMP_WIDTH>0,
@@ -1037,6 +1272,25 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 #endif
 		// Did we get an error running the code? Abort if yes.
 		cudaDeviceSynchronize(); //wait until kernel has had a chance to report error
+		fprintf(stderr,"\n[aln_debug] cuda_inexact_match_caller completed\n");
+
+		// Copy alignment results back to check what was found
+		cudaMemcpy(global_alignment_meta_host, global_alignment_meta_device, no_to_process*sizeof(alignment_meta_t), cudaMemcpyDeviceToHost);
+		int total_alignments = 0;
+		for(int i = 0; i < min(5, no_to_process); i++) {
+			fprintf(stderr, "[aln_debug] seq %d: no_of_alignments=%d, best_score=%d, sequence_id=%d, pos=%d\n",
+				i, global_alignment_meta_host[i].no_of_alignments, global_alignment_meta_host[i].best_score,
+				global_alignment_meta_host[i].sequence_id, global_alignment_meta_host[i].pos);
+			total_alignments += global_alignment_meta_host[i].no_of_alignments;
+		}
+		fprintf(stderr, "[aln_debug] Total alignments found in first 5 sequences: %d\n", total_alignments);
+
+		// Compare failing sequence 0 with working sequence 4
+		if (no_to_process > 4) {
+			fprintf(stderr, "[aln_debug] Comparison - Seq0 (failing): score=%d, alignments=%d vs Seq4 (working): score=%d, alignments=%d\n",
+				global_alignment_meta_host[0].best_score, global_alignment_meta_host[0].no_of_alignments,
+				global_alignment_meta_host[4].best_score, global_alignment_meta_host[4].no_of_alignments);
+		}
 		cuda_err = cudaGetLastError();
 		if(int(cuda_err))
 		{
@@ -1416,6 +1670,24 @@ void core_kernel_loop(int sel_device, int buffer, gap_opt_t *opt, bwa_seqio_t *k
 	free(global_alns_host_final);
 	free(global_seq_flag_host);
 
+	// Cleanup long-read buffers
+	if (global_long_sequences) {
+		cudaFree(global_long_sequences);
+		cudaCheck();
+	}
+	if (main_long_sequences) {
+		cudaFreeHost(main_long_sequences);
+		cudaCheck();
+	}
+	if (global_long_sequences_index) {
+		cudaFree(global_long_sequences_index);
+		cudaCheck();
+	}
+	if (main_long_sequences_index) {
+		cudaFreeHost(main_long_sequences_index);
+		cudaCheck();
+	}
+
 	return;
 }
 
@@ -1574,8 +1846,14 @@ void cuda_alignment_core(const char *prefix, bwa_seqio_t *ks,  gap_opt_t *opt)
 	}
 	//fprintf(stderr,"[aln_core] buffer is %d.\n",buffer,16);
 
+	// Initialize modern streaming architecture
+	barracuda_init_streaming();
+
 	//calls core_kernel_loop
 	core_kernel_loop(sel_device, buffer, opt, ks, total_time_used, global_bwt);
+
+	// Cleanup streaming architecture
+	barracuda_cleanup_streaming();
 
 	free_bwts_from_cuda_memory(global_bwt);
 

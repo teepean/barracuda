@@ -41,17 +41,17 @@ EXECUTABLE   ?= $(lastword $(subst /, ,$(PWD)))
 BINDIR       ?= $(SYSTEM)
 ROOTOBJDIR   ?= $(SYSTEM)
 
-ifeq ($(ConfigName),debug)
-verbose = 1
-dbg = 1
-else 
-verbose = 0
-dbg = 0
-endif
-
 # Allow overriding for debug/release via command line (e.g., make DEBUG=1)
 ifeq ($(DEBUG),1)
 ConfigName = debug
+endif
+
+ifeq ($(ConfigName),debug)
+verbose = 1
+dbg = 1
+else
+verbose = 0
+dbg = 0
 endif
 
 ################################################################################
@@ -139,8 +139,11 @@ COMMONFLAGS += $(INCLUDES) -DUNIX
 # Debug/release configuration
 ifeq ($(dbg),1)
 	COMMONFLAGS += -g
-	NVCCFLAGS   += -D_DEBUG
-	COMMONFLAGS += -Og -finline-functions
+	NVCCFLAGS   += -D_DEBUG -lineinfo
+	# Add compute-sanitizer memcheck flags
+	NVCCFLAGS   += -Xcompiler -rdynamic
+	CXXFLAGS    += -O0 -g
+	CFLAGS      += -O0 -g
 	BINSUBDIR   := debug
 	LIBSUFFIX   := D
 else 
@@ -266,56 +269,38 @@ PTXBINS +=  $(patsubst %.cu,$(PTXDIR)/%.ptx,$(notdir $(PTXFILES)))
 ################################################################################
 # Rules
 ################################################################################
+
+# This rule compiles .c files
 $(OBJDIR)/%.c.o : $(SRCDIR)%.c $(C_DEPS)
 	$(VERBOSE)$(CC) $(CFLAGS) -M $< | sed 's|^.*.o:|$(OBJDIR)/$<.o:|' > $(OBJDIR)/$<.d
 	$(VERBOSE)$(CC) $(CFLAGS) -o $@ -c $<
 
+# This rule compiles .cpp files
 $(OBJDIR)/%.cpp.o : $(SRCDIR)%.cpp $(C_DEPS)
-	#$(VERBOSE)$(CXX) $(CXXFLAGS) -M $< | sed 's|^.*.o:|$(OBJDIR)/$<.o:|' > $(OBJDIR)/$<.d
 	$(VERBOSE)$(CXX) $(CXXFLAGS) -o $@ -c $<
 
+# This is the corrected rule for compiling .cu files
 $(OBJDIR)/%.cu.o : $(SRCDIR)%.cu $(CU_DEPS)
-	$(VERBOSE)$(NVCC) $(NVCCFLAGS) $(SMVERSIONFLAGS) -M $< | sed 's|^.*.o :|$(OBJDIR)/$<.o :|' > $(OBJDIR)/$<.d
-	$(VERBOSE)$(NVCC) $(NVCCFLAGS) $(SMVERSIONFLAGS) -o $@ -c $< 2>&1 | sed 's/(\([0-9]*\)):/:\1:/'
+	$(VERBOSE)$(NVCC) $(NVCCFLAGS) -arch $(SM_VERSIONS) -M $< | sed 's|^.*.o :|$(OBJDIR)/$<.o :|' > $(OBJDIR)/$<.d
+	$(VERBOSE)$(NVCC) $(NVCCFLAGS) -arch $(SM_VERSIONS) -o $@ -c $< 2>&1 | sed 's/(\([0-9]*\)):/:\1:/'
 
+# These rules are for generating .cubin and .ptx files if needed
 $(CUBINDIR)/%.cubin : $(SRCDIR)%.cu cubindirectory
-	$(VERBOSE)$(NVCC) $(CUBIN_ARCH_FLAG) $(NVCCFLAGS) $(SMVERSIONFLAGS) -o $@ -cubin $<
+	$(VERBOSE)$(NVCC) $(CUBIN_ARCH_FLAG) $(NVCCFLAGS) -o $@ -cubin $<
 
 $(PTXDIR)/%.ptx : $(SRCDIR)%.cu ptxdirectory
-	$(VERBOSE)$(NVCC) $(CUBIN_ARCH_FLAG) $(NVCCFLAGS) $(SMVERSIONFLAGS) -o $@ -ptx $<
+	$(VERBOSE)$(NVCC) $(CUBIN_ARCH_FLAG) $(NVCCFLAGS) -o $@ -ptx $<
 
+# This includes the dependency files
 -include $(OBJDIR)/*.d
 
-#
-# The following definition is a template that gets instantiated for each SM
-# version (sm_10, sm_13, etc.) stored in SMVERSIONS.  It does 2 things:
-# 1. It adds to OBJS a .cu_sm_XX.o for each .cu file it finds in CUFILES_sm_XX.
-# 2. It generates a rule for building .cu_sm_XX.o files from the corresponding 
-#    .cu file.
-#
-# The intended use for this is to allow Makefiles that use common.mk to compile
-# files to different Compute Capability targets (aka SM arch version).  To do
-# so, in the Makefile, list files for each SM arch separately, like so:
-#
-# CUFILES_sm_10 := mycudakernel_sm10.cu app.cu
-# CUFILES_sm_12 := anothercudakernel_sm12.cu
-#
-define SMVERSION_template
-OBJS += $(patsubst %.cu,$(OBJDIR)/%.cu_$(1).o,$(notdir $(CUFILES_$(1))))
-$(OBJDIR)/%.cu_$(1).o : $(SRCDIR)%.cu $(CU_DEPS)
-	$(VERBOSE)$(NVCC) -o $$@ -c $$< $(NVCCFLAGS) -arch $(1)
-endef
-
-# This line invokes the above template for each arch version stored in
-# SM_VERSIONS.  The call function invokes the template, and the eval
-# function interprets it as make commands.
-$(foreach smver,$(SM_VERSIONS),$(eval $(call SMVERSION_template,$(smver))))
-
+# The main build rule
 all:$(TARGET)
 $(TARGET): makedirectories $(OBJS) $(CUBINS) $(PTXBINS) Makefile
 	$(VERBOSE)$(LINKLINE)
 	$(VERBOSE)echo "Done!"
 
+# Rules for creating directories
 cubindirectory:
 	$(VERBOSE)mkdir -p $(CUBINDIR)
 
@@ -326,6 +311,7 @@ makedirectories:
 	$(VERBOSE)mkdir -p $(OBJDIR)
 	$(VERBOSE)mkdir -p $(TARGETDIR)
 
+# Rules for cleaning up the project
 tidy :
 	$(VERBOSE)find . | egrep "#" | xargs rm -f
 	$(VERBOSE)find . | egrep "\~" | xargs rm -f

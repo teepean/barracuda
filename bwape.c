@@ -1092,10 +1092,12 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	err_fread(&opt, sizeof(gap_opt_t), 1, fp_sa[1]); // overwritten!
 	check_opt(&opt,1,fn_sa[1]);
 	ks[1] = bwa_open_reads(opt.mode, fn_fa[1]);
-	if (!(opt.mode & BWA_MODE_COMPREAD)) {
-		popt->type = BWA_PET_SOLID;
-		ntbns = bwa_open_nt(prefix);
-	} else { // for Illumina alignment only
+	// Color space mode disabled - regular DNA only
+	// if (!(opt.mode & BWA_MODE_COMPREAD)) {
+	//	popt->type = BWA_PET_SOLID;
+	//	ntbns = bwa_open_nt(prefix);
+	// } else { // for Illumina alignment only
+	{ // for Illumina alignment only
 		if (popt->is_preload) {
 			fprintf(stderr,"[sampe_core] Loading BWTs, please wait..");
 			// load forward & reverse SA

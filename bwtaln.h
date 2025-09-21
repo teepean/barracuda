@@ -45,6 +45,8 @@ restore STDOUT_STRING_RESULT add same_length
 
 #define BWA_MAX_BCLEN 63 // maximum barcode length; 127 is the maximum
 
+#define SAI_MAGIC "SAI\1"
+
 #ifndef bns_pac
 #define bns_pac(pac, k) ((pac)[(k)>>2] >> ((~(k)&3)<<1) & 3)
 #endif

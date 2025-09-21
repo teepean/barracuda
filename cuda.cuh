@@ -78,6 +78,12 @@ __device__ unsigned char read_char(const uint32_t* seq_words, unsigned int pos, 
 {
 	unsigned char c;
 	unsigned int pos_shifted = pos >> 3;
+
+	// Bounds check to prevent out-of-bounds access
+	if (pos_shifted >= (1ul<<20)) {
+		return 4; // Return 'N' for out-of-bounds access
+	}
+
 	unsigned int tmp = *data;
 	if (*lastpos!=pos_shifted)
 	{
